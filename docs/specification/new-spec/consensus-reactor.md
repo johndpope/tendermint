@@ -89,9 +89,97 @@ type PeerRoundState struct {
 
 ## Receive method of Consensus reactor
 
-When a message is received from a peer p, it is treated differently based on the channel message belongs to.
+When a message is received from a peer p, normally the peer round state is updated correspondingly, and some messages 
+are passed for further processing, for example to consensus core reactor. We now specify the processing of messages
+in the receive method of Consensus reactor for each message type.
 
-TODO: Add high level description of the logic of Receive method. 
+TODO: Add short description/intuition behind handlers (at least for more complicated one).
+
+### NewRoundStepMessage handler 
+
+``` 
+handleMessage(msg):
+    if msg is from smaller height/round/step then return
+    Update prs with values from msg
+    if prs.Height or prs.Round has been updated then
+        reset Proposal related fields of the peer state 
+    if prs.Round has been updated and is equal to catchup round then
+        prs.Precommits = catchup round
+    if prs.Height has been updated then 
+        Update prs.LastCommit and prs.LastCommitRound
+        Reset prs.CatchupCommitRound and prs.CatchupCommit
+``` 
+
+### CommitStepMessage handler
+
+``` 
+handleMessage(msg):
+    if prs.Height == msg.Height then 
+        prs.ProposalBlockPartsHeader = msg.BlockPartsHeader
+        prs.ProposalBlockParts = msg.BlockParts
+``` 
+
+### HasVoteMessage handler
+
+``` 
+handleMessage(msg):
+    if prs.Height == msg.Height then 
+        prs.setHasVote(msg.Height, msg.Round, msg.Type, msg.Index)
+```  
+
+### VoteSetMaj23Message handler
+
+``` 
+handleMessage(msg):
+    if prs.Height == msg.Height then
+        Record in consensus state that a peer claim to have ⅔ majority for msg.BlockID
+        Send VoteSetBitsMessage showing votes node has for that BlockId 
+``` 
+
+### ProposalMessage handler
+
+```
+handleMessage(msg):
+    if !(it is not from the matching round or if prs.Proposal) then    
+        prs.Proposal = true
+        prs.ProposalBlockPartsHeader = proposal.BlockPartsHeader
+        prs.ProposalBlockParts = empty set    
+        prs.ProposalPOLRound = proposal.POLRound
+        prs.ProposalPOL = nil 
+        Send msg through internal peerMsgQueue to consensus core routine
+``` 
+
+### ProposalPOLMessage handler
+
+``` 
+handleMessage(msg):
+    if prs.Height != msg.Height or prs.ProposalPOLRound != msg.ProposalPOLRound then return
+    prs.ProposalPOL = msg.ProposalPOL
+``` 
+
+### BlockPartMessage handler
+
+``` 
+handleMessage(msg):
+    if ps.Height != height || ps.Round != round then return
+    Record in prs that peer has block part msg.Part.Index 
+    Send msg trough internal peerMsgQueue to consensus core routine
+``` 
+
+### VoteMessage handler
+
+``` 
+handleMessage(msg):
+    Record that a peer knows vote with index msg.vote.ValidatorIndex for particular height and round
+    Send msg trough internal peerMsgQueue to consensus core routine
+``` 
+
+### VoteSetBitsMessage handler
+
+```     
+handleMessage(msg):
+    Update the peer state for the bit-array of votes it claims to have for the msg.BlockID
+``` 
 
 ## Gossip Data Routine
 
@@ -102,7 +190,7 @@ and the known PeerRoundState (denotes prs). The routine repeats forever the logi
 ```
 1a) if rs.ProposalBlockPartsHeader == prs.ProposalBlockPartsHeader and the peer does not have all the proposal parts then
         Part = pick a random proposal block part the peer does not have 
-        Send BlockPartMessage(Height, Round, Part) to the peer on the DataChannel 
+        Send BlockPartMessage(rs.Height, rs.Round, Part) to the peer on the DataChannel 
         if send returns true, record that the peer knows the corresponding block Part
 	    Continue  
  
@@ -127,6 +215,22 @@ and the known PeerRoundState (denotes prs). The routine repeats forever the logi
 2)  Sleep PeerGossipSleepDuration 
 ```
 
+### Gossip Data For Catchup
+
+This function is responsible for helping peer catch up if it is at the smaller height (prs.Height < rs.Height).
+The function executes the following logic:
+
+    if peer does not have all block parts for prs.ProposalBlockPart then 
+        blockMeta =  Load Block Metadata for height prs.Height from blockStore
+        if (!blockMeta.BlockID.PartsHeader == prs.ProposalBlockPartsHeader) then
+            Sleep PeerGossipSleepDuration
+    	return
+        Part = pick a random proposal block part the peer does not have 
+        Send BlockPartMessage(prs.Height, prs.Round, Part) to the peer on the DataChannel 
+        if send returns true, record that the peer knows the corresponding block Part
+        return
+    else Sleep PeerGossipSleepDuration    
+    
 ## Gossip Votes Routine
 
 It is used to send the following message: `VoteMessage` on the VoteChannel.
